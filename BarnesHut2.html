@@ -1,0 +1,913 @@
+<!DOCTYPE html>
+<html>
+ <!-- Simulation of bodies experiencing mutual attraction, gravity-style -->
+ <!-- Created by Tristan Miller, January 2017 -->
+ <!-- Download and then open in your browser. -->  
+<head>
+<meta charset="utf-8">
+<title>Barnes-Hut Algorithm Thing (BHAT)</title>
+<style>
+
+//this CSS is terrible and I feel bad about it
+canvas {
+    border: 0px #CCC solid;
+}
+
+input[type="checkbox"]
+{
+  /* Double-sized Checkboxes */
+  -ms-transform: scale(2); /* IE */
+  -moz-transform: scale(2); /* FF */
+  -webkit-transform: scale(2); /* Safari and Chrome */
+  -o-transform: scale(2); /* Opera */
+  padding: 10px;
+}
+
+#controls
+{
+  font-size: 110%;
+  display: inline;
+  padding:5px;
+  padding-top: 0px;
+}
+
+label
+{
+ padding: 15px;
+ padding-right: 2px;
+}
+
+div, button
+{
+ margin: 5px;
+ margin-left:10px;
+}
+
+h2
+{
+ padding:0px;
+ margin:0px;
+}
+
+
+</style>
+</head>
+
+<body>
+<h1 id="theTitle">BHA Particles</h1>
+
+<canvas id="mainCanvas" height="1024" width="1024">This text is displayed if your browser don't support HTML5 Canvas!</canvas>
+<h2 id="status2">N | f</h2>
+
+<div id="controls">
+	<div id="particleControls">
+		<button type="button" id="playPause" onclick="playPause()">Pause</button>
+		<button type="button" id="setVtoZero" onclick="setVtoZero()">Zero speeds</button>
+		<label for="fComChx">Walls</label>
+		<input type="checkbox" id="wallChx" onchange="toggleWalls()">
+		
+		<button type="button" id="playPause" onclick="clearP()">Clear particles</button>
+		<button type="button" id="addNP" onclick="addNP()">Add particles</button>
+		<label for="selectN" >Particles to add</label>
+		<input type="range" id="selectN" class="comptrol" min = "1" max = "100" step = "1" value="10" onInput="updateNewN(value)">
+		<span id="newN">10</span>
+	</div>
+	<div id="viewpointControls">
+		<label for="sOriChx">Show origin</label>
+		<input type="checkbox" id="sOriChx" onchange="toggleOrigin()">
+		<button type="button" id="jumpToOrigin" onclick="jumpToOrigin()">Jump to origin</button>
+		<label for="labelChx">Show CoM</label>
+		<input type="checkbox" id="sCoMChx" onchange="toggleCoM()">
+		<button type="button" id="jumpToCoM" onclick="jumpToCoM()">Jump to CoM</button>
+		<label for="fComChx">Follow CoM</label>	
+		<input type="checkbox" id="fCoMChx" onchange="toggleFollowCoM()">
+	</div>
+	<div id="graphicsControls">
+		<label for="treeChx">Show quadtree</label>
+		<input type="checkbox" id="treeChx" onchange="toggleTree()" checked>
+		<label for="pChx">Show particles</label>
+		<input type="checkbox" id="pChx" onchange="toggleP()" checked>
+		<label for="sComChx">Show particle labels</label>
+		<input type="checkbox" id="labChx" onchange="toggleLabels()">
+		<label for="trlChx">Trails</label>	
+		<input type="checkbox" id="trlChx" onchange="toggleTrails()">
+		<label for="trailP" >Trail persistence</label>
+		<input type="range" id="trailP" class="comptrol" min = "0" max = "1" step = "0.01" value="0.41" onInput="updateTrailP(value)">
+		<span id="trailPdisplay">0.8</span>
+	</div>
+
+</div>
+
+
+
+
+
+
+<script>
+
+var GG = 5;
+var ES = 2;
+var thresh = 0.5; //value of s/d below which the CoM of a node can be used for force calculation. S is the width of the node, d is the distance of a particle to the node's CoM. 
+var N = 1;  //number of particles
+var maxDepth = 20	; //maximum depth for the recursion
+var ride = 25; //distance where force calculation switches off (fudge to prevent incorrect consequences of close interactions).
+//need to invest in some kind of method of dealing with this situation (alter time step within certain radius)...
+var rideSq = ride*ride;
+var showTree = true;
+var walls = false;
+var showCoM = false;
+var showOrigin = false;
+var followCoM = false;
+var labels = false;
+var paused = false;
+var trails = false;
+var trailP = 0.8;
+var showParticles = true;
+		
+
+
+var Particle = function(posX, posY, velX, velY) {
+    this.posX = posX;
+    this.posY = posY;
+    this.velX = velX;
+    this.velY = velY;
+	if(Math.random() > 0.8){this.square = true;}
+	
+    return this;
+};
+ 
+
+Particle.prototype = {
+    posX: 0,
+    posY: 0,
+    velX: 0,
+    velY: 0,
+	mass: 1,
+	charge: 1,
+ 	size: 2,
+	label: "",	
+	colour: "rgb(255,255,255)",
+	iList: [],
+	walls: false, //this is reset conditional on a checkbox. Just testing out modifying prototype properties at runtime.
+    square: false,
+	ang:0,
+	rot:1,
+	
+	
+	render: function(ctx) {
+        ctx.fillStyle= this.colour;
+		ctx.strokeStyle = "rgba(255,255,255,0.4)";
+		ctx.lineWidth = 1;
+		ctx.fillStyle= this.colour;
+		ctx.beginPath();
+		if(this.square){
+			ctx.save();
+			ctx.translate(this.posX - 0.5*this.size, this.posY - 0.5*this.size);
+			ctx.rotate(2*Math.PI*this.ang/360);
+			ctx.rect(0,0, this.size, this.size);
+
+			ctx.fill();
+			ctx.stroke();
+			ctx.restore();
+		} else {
+			ctx.arc(this.posX,this.posY,0.5*this.size,0,2*Math.PI);
+			ctx.fill();
+			ctx.stroke();
+		}
+	},
+	
+	update: function() {
+		this.posX = this.posX + this.velX;
+		this.posY = this.posY + this.velY; 
+		this.size = 2*this.mass;
+		
+		if(this.square){
+		this.ang = (this.ang + this.rot)%360;
+		}
+		
+		if(this.walls){
+			if((this.velX > 0 && this.posX > width) || (this.velX < 0 && this.posX < 0)){
+				this.velX = -0.7*this.velX;
+			}
+			if((this.velY > 0 && this.posY > height) || (this.velY < 0 && this.posY < 0)){
+				this.velY = -0.7*this.velY;
+			}
+		}
+		this.iList = [];
+	}
+};
+
+
+
+	
+var title = document.querySelector("#theTitle");
+var mainCanvas = document.querySelector("#mainCanvas");
+var mainContext = mainCanvas.getContext("2d");
+
+//create canvases that never appear onscreen or in the DOM but are used for layered rendering
+var canvas0 = document.createElement("canvas");
+canvas0.width = mainCanvas.width;
+canvas0.height = mainCanvas.height;
+var context0 = canvas0.getContext("2d");
+
+var canvas1 = document.createElement("canvas");
+canvas1.width = canvas0.width;
+canvas1.height = canvas0.height;
+var context1 = canvas1.getContext("2d");
+
+var canvas2 = document.createElement("canvas");
+canvas2.width = canvas0.width;
+canvas2.height = canvas0.height;
+var context2 = canvas2.getContext("2d");
+
+
+var mouseX = 0;
+var mouseY = 0;
+
+mainCanvas.addEventListener('mousemove', function(event){
+	mouseX = event.pageX - mainCanvas.offsetLeft;
+	mouseY = event.pageY - mainCanvas.offsetTop;
+	//var status = document.getElementById('status');
+	//status.innerHTML = mouseX + " | " + mouseY + " | ";
+});
+	
+	var canvasWidth = mainCanvas.width;
+	var canvasHeight = mainCanvas.height;
+	
+	var requestAnimationFrame = window.requestAnimationFrame || 
+                            window.mozRequestAnimationFrame || 
+                            window.webkitRequestAnimationFrame || 
+                            window.msRequestAnimationFrame;
+							
+var width = canvasWidth;
+var height = canvasHeight; //maximum dimensions of the 'world'
+
+var nodeList = [];
+var particles = [];  
+var CoM = [0.5*width,0.5*height, 0];  //CoM of entire system!
+var lastCoM = CoM;
+
+var forceCalcs = 0;  //initialise counter for force calculations
+var newN;
+updateNewN(10);
+
+
+buildParticleList(particles, N, CoM); //Generate a list of particles from which to build the quadtree
+
+context0.fillStyle = "rgba(30,0,45,1)";
+context0.fillRect(0,0,width,height);
+
+//main program loop
+drawWorld();
+
+function drawWorld(){
+
+	var status2 = document.getElementById('status2');
+	status2.innerHTML = "Particles: " + N + " | Force calcs:  " + forceCalcs;
+
+	context1.clearRect(0,0,width,height);
+	if(trails){
+		context1.globalAlpha = trailP;
+		context1.drawImage(canvas2,0,0);
+		context2.clearRect(0,0,width,height);
+		context2.drawImage(canvas1,0,0);
+	} else {
+		context2.clearRect(0,0,width,height);
+	}
+
+
+	if(followCoM){
+		lastCoM = CoM;
+	}
+	
+	CoM = getCoM(particles);
+
+	context0.fillStyle = "rgba(30,0,45,1)";
+	context2.fillStyle = "rgba(30,0,45,0.1)";
+	context0.fillRect(0,0,width,height);
+
+	forceCalcs = 0;
+	nodeList = [];
+	
+	var thisTree = buildTree();
+
+	context0.save();
+	context2.save();
+
+	
+	if(followCoM){
+		context2.translate(-1*CoM[0]+ 0.5*width,-1*CoM[1]+0.5*height);
+		context0.translate(-1*CoM[0]+ 0.5*width,-1*CoM[1]+0.5*height);
+	} else {
+		context2.translate(-1*lastCoM[0]+ 0.5*width,-1*lastCoM[1]+0.5*height);
+		context0.translate(-1*lastCoM[0]+ 0.5*width,-1*lastCoM[1]+0.5*height);
+	}
+
+	if(showTree){
+		for(var i = 0; i < nodeList.length; i++){
+			var node = nodeList[i];
+			if(node.visible){
+				drawNode(node,context0);
+			}
+		}
+	}
+
+	if(particles.length > 0){
+		for(p in particles) {
+			particles[p].update();
+			if(showParticles){
+				particles[p].render(context2);
+				if(labels){	
+					context0.font="20px Georgia";
+					context0.fillStyle = particles[p].colour;
+					context0.fillText(particles[p].label,particles[p].posX + 3,particles[p].posY - 3);
+				}
+			}
+		}
+	}
+ 
+	doForces(particles, thisTree, 'mass');
+	
+
+	if(showOrigin){
+		drawCross([width/2, height/2],context0, "red");
+		context0.beginPath();
+		context0.arc(width/2,height/2,0.05*width,0,2*Math.PI);
+		context0.stroke();
+	
+		if(showCoM){
+		context0.beginPath();
+			context0.strokeStyle = "rgba(255,255,255,0.3)";
+			context0.moveTo(width/2,height/2);
+			context0.lineTo(CoM[0],CoM[1]);
+			context0.stroke();
+		}
+	}	
+
+	
+
+	
+	if(showCoM){
+		drawCross(CoM, context0, "white");
+	}
+	if(walls){
+		context0.strokeStyle = "rgb(255, 100, 255)";
+		context0.lineWidth = 18;
+		context0.beginPath();
+		context0.rect(0,0, width, height);
+		context0.stroke();
+	}
+	
+	mainContext.drawImage(canvas0,0,0);
+	mainContext.drawImage(canvas2,0,0);
+	
+	context0.restore();
+	context2.restore();
+	
+	if(!paused){
+	   requestAnimationFrame(drawWorld);
+	} else {
+	context0.fillStyle = "rgba(100,100,255,0.3)";
+	context0.fillRect(0, 0, width, 35);
+	
+    context0.fillStyle = "rgb(255,255,255)";
+    context0.font="20px Helvetica";
+    context0.textAlign = "center";
+    context0.fillText("Paused!",width/2 ,25);
+   }
+}
+
+
+
+function newRandParticle(x, y, vx, vy, dM){
+	var p = new Particle(x, y, vx, vy);
+	p.mass = dM*Math.random();
+	p.charge = 0.5 - Math.random();
+	p.colour = "rgb(" + (Math.round(95 + 160*Math.random())) + "," + Math.round((95 + 160*Math.random())) + "," + Math.round((95 + 160*Math.random())) + ")";
+	p.rot = 3*Math.random();
+	return p;
+}
+
+function buildParticleList(array, n, pos){
+	
+	for (var i = 0; i < n; i++){
+		var randpX = pos[0] + 0.375*width*(0.5 - Math.random());
+		var randpY = pos[1] + 0.375*height*(0.5 - Math.random());
+		//var randvX = (width/512)*(0.5 - Math.random());
+		//var randvY = (height/512)*(0.5 - Math.random());
+	
+
+		var distX = randpX - 0.5*width;
+		var distY = randpY - 0.5*height;
+		var d = Math.sqrt((distX*distX)+(distY*distY));
+		var v = 0.02*width*Math.sqrt(1/d);
+		var randvX = v*distY/d;
+		var randvY = -1*v*distX/d; 
+	 
+		var p = newRandParticle(randpX,randpY, randvX, randvY, width/128);
+		p.label = i;
+
+		array.push(p);
+	}
+}
+
+
+
+function insideBox(x,y,bounds) {
+	if (x >= bounds[0] && x < bounds[1] && y >= bounds[2] && y < bounds[3]){
+		return(true);
+	} else {
+		return(false);
+	}
+}
+
+function addParticle(thisP, node) {
+//try to place a particle
+//1. is it in the bounds of this area?
+
+	if(insideBox(thisP.posX, thisP.posY, node.bounds)){
+		//add to this node's list of particles
+		node.pList.push(thisP);
+		node.parts = node.pList.length;
+		//recalculate total charge or mass and node's centre of mass
+		node.posX = (node.mass*node.posX + thisP.mass*thisP.posX)/(node.mass + thisP.mass);
+		node.posY = (node.mass*node.posY + thisP.mass*thisP.posY)/(node.mass + thisP.mass);
+		node.mass = node.mass + thisP.mass;
+		node.charge = node.charge + thisP.charge;
+		
+		//Try to place this particle in it's own personal node
+		if(node.pList.length == 1 || node.depth == maxDepth){
+				//if it's the first particle in the area the job is done.
+		} else if(node.pList.length == 2 ){
+				//if it's the second particle in the area, create (sub)nodes and calculate their bounds.
+			node.visible = false;	
+			var halfX = (node.bounds[1] - node.bounds[0])/2;
+			var halfY = (node.bounds[3] - node.bounds[2])/2;		
+			var newBounds = [];
+				for(var j = 0; j < 2; j++){
+					for(var k = 0; k < 2; k++){
+						b = [node.bounds[0] + k*halfX, node.bounds[0] + (1+k)*halfX, node.bounds[2] + j*halfY, node.bounds[2] + (1+j)*halfY];
+						newBounds.push(b);
+					}
+				}
+				
+				
+				for(var j = 0; j < node.nodes.length; j++){
+					node.nodes[j] = {
+						bounds: newBounds[j],
+						pList: [],
+						parts: 0,
+						nodes : [null, null, null, null],
+						depth : node.depth + 1,
+						posX : 0,   //these are the CoM coordinates
+						posY : 0,
+						mass : 0,
+						charge : 0,
+						quad : j,
+						visible: true
+						};
+						
+					nodeList.push(node.nodes[j]);
+				}
+				
+					//for each of the particles in this node's pList, find out which quad it's in and attempt to push it into the appropriate (sub)node.
+				for(var j = 0; j < node.pList.length; j++){
+					var subP = node.pList[j];
+					var q = getQuad(subP, node);
+					addParticle(subP, node.nodes[q]); 
+				} 
+				
+			} else {
+				//if the (sub)nodes already exist, find out which quadrant the particle is in and dump it into the appropriate (sub)node
+				var q = getQuad(thisP, node);
+				addParticle(thisP, node.nodes[q]);
+			}	
+		} 
+	}
+
+
+
+function buildTree() {
+
+//just the one tree actually
+	trunk = {
+		bounds: calculateBoundingBox(particles),	//determine the bounding box from the particle positions
+		parts : 0,
+		pList : [],
+		nodes : [null, null, null, null],
+		depth : 0,
+		mass : 0,
+		charge : 0,
+		posX : 0,
+		posY : 0,
+		quad: 0,
+		visible: true
+	
+	};
+	
+	nodeList.push(trunk);
+	
+	//push every particle into the top node (initiating the recursive tree building)
+	
+	for(var i = 0; i < particles.length; i++){
+		addParticle(particles[i], trunk);
+	}
+	
+	return(trunk);
+}
+
+
+function getQuad(particle, node){
+	//which quadrant of a node's space are we in?
+	var halfX = node.bounds[0] + 0.5*(node.bounds[1] - node.bounds[0]);
+	var halfY = node.bounds[2] + 0.5*(node.bounds[3] - node.bounds[2]);
+	var q = 0;
+
+	if(particle.posX < halfX){
+		if(particle.posY < halfY){ q = 0; } else{ q = 2; }
+	} else {
+		if(particle.posY < halfY){ q = 1; } else{ q = 3; }
+	}
+	return(q);
+}
+
+
+function doForces(pList, tree, prop) {
+//build interaction list for each particle
+	for(var i = 0; i < pList.length; i++){
+	
+	//console.log("building iList for particle #" + i);
+		buildInteractionList(pList[i], tree, prop);
+		//console.log(pList[i].iList);
+	}
+
+	for(var i = 0; i < pList.length; i++) {
+		var F = [0,0];
+
+		for(var j = 0; j < pList[i].iList.length; j++){
+			var b = pList[i].iList[j];
+			if(b[2] > rideSq){
+				var newF =	calculateForce(GG, 'mass', pList[i], b[0], b[2], b[3]);
+				
+				F[0] = F[0] + newF[0];
+				F[1] = F[1] + newF[1];
+			}
+
+					forceCalcs ++;
+		}
+
+		pList[i].velX = pList[i].velX + F[0]/pList[i].mass;
+		pList[i].velY = pList[i].velY + F[1]/pList[i].mass;
+
+
+
+	}
+}
+
+function calculateForce(Fconst, prop, body1, body2prop, dSq, comps ){
+	var F = Fconst*body1[prop]*body2prop/dSq;
+	return [F*comps[0], F*comps[1]];
+};
+
+function unitComponents(dX, dY, d){
+	var cX = dX/d;
+	var cY = dY/d;
+	return [cX, cY];
+};
+
+
+function buildInteractionList(p, node, prop){
+
+		if(node.pList.length > 0){
+		if(!(node.pList.length == 1 && node.pList[0] == p)){
+			var spatials = calculateSpatialThings(p, node);
+			var sSq = (node.bounds[1] - node.bounds[0])*(node.bounds[3] - node.bounds[2]);
+			//console.log("criterion = " + sSq/spatials[2]);
+			if(sSq/spatials[2] < thresh){ //if the node is far enough away
+				//add the node's mass, distance and unit components to the particle's interaction list
+				var d = Math.sqrt(spatials[2]);
+			
+				
+				p.iList.push([node[prop], d, spatials[2], unitComponents(spatials[0],spatials[1],d)]);
+				//console.log("managed to push a node CoM into the list!");
+				
+			} else { 
+				//console.log("attempting to go deeper. new depth = " + (node.depth + 1));
+				for(var j = 0; j < node.nodes.length; j++){
+					if(node.nodes[j]){
+						buildInteractionList(p, node.nodes[j], prop);
+					} else {
+						//console.log("no deeper nodes exist!");
+						for (var k = 0; k < node.pList.length; k++){
+							if(node.pList[k] != p){
+								//console.log("particle interacted with : " + node.pList[k].posX);
+								var ipSpatials = calculateSpatialThings(p, node.pList[k]);
+								var ipd = Math.sqrt(ipSpatials[2]);
+								
+								p.iList.push([node[prop], ipd, ipSpatials[2], unitComponents(ipSpatials[0],ipSpatials[1],ipd)]);
+							}
+						}
+						break;
+					}
+				}
+			}
+} else {
+//console.log("avoiding self-interaction");
+}			
+		} else {
+		
+		//console.log("no particles in node!");
+		}
+}
+
+function calculateSpatialThings(thing1, thing2){
+	var dX = thing2.posX - thing1.posX;
+	var dY = thing2.posY - thing1.posY;
+	var dSq = Math.pow(dX,2) + Math.pow(dY,2);
+ return [dX,dY,dSq];
+}
+
+
+function calculateBoundingBox(particleList){
+//find the minimum and maximum x and y coordinates in the particle list.
+var boundingBox = [CoM[0], CoM[0] + width, CoM[1], CoM[1]+height];
+if(particles.length > 0){
+	var posXList = []; 
+	var posYList = [];
+
+
+	
+	for (p in particleList){
+		posXList.push(particleList[p].posX);
+		posYList.push(particleList[p].posY);
+	}	
+
+	var maxX = Math.max.apply(null,posXList);
+	var minX = Math.min.apply(null,posXList);
+	var maxY = Math.max.apply(null,posYList);
+	var minY = Math.min.apply(null,posYList);
+	
+
+
+	//here comes some clumsiness
+	var bBwidth = boundingBox[1] - boundingBox[0];
+	var bBheight = boundingBox[3] - boundingBox[2];
+
+	if(maxX > boundingBox[1] || minX < boundingBox[0]){
+		do{ 
+			bBwidth = boundingBox[1] - boundingBox[0];
+			boundingBox[0] = boundingBox[0] - 0.5*bBwidth;
+			boundingBox[1] = boundingBox[1] + 0.5*bBwidth;
+			//console.log("made X extents bigger");
+		} while(maxX > boundingBox[1] || minX < boundingBox[0]);
+	} else if((maxX < boundingBox[1] - 0.25*bBwidth && minX > boundingBox[0] + 0.25*bBwidth ) && boundingBox [1] > 0.75*width){
+		do{
+			bBwidth = boundingBox[1] - boundingBox[0];
+			boundingBox[0] = boundingBox[0] + 0.25*bBwidth;
+			boundingBox[1] = boundingBox[1] - 0.25*bBwidth;
+			//console.log("made X extents smaller");
+		} while((maxX < boundingBox[1] - 0.25*bBwidth && minX > boundingBox[0] + 0.25*bBwidth ) && boundingBox [1] > 0.75*width);
+	}
+
+	if(maxY > boundingBox[3] || minY < boundingBox[2]){
+		do{ 
+			bBheight = boundingBox[3] - boundingBox[2];
+			boundingBox[2] = boundingBox[2] - 0.5*bBheight;
+			boundingBox[3] = boundingBox[3] + 0.5*bBheight;
+			//console.log("made Y extents bigger");
+		} while(maxY > boundingBox[3] || minY < boundingBox[2]);
+	} else if((maxY < boundingBox[3] - 0.25*bBheight && minY > boundingBox[2] + 0.25*bBheight) && boundingBox[3] > 0.75*height){
+		do {
+			bBheight = boundingBox[3] - boundingBox[2];
+			boundingBox[2] = boundingBox[2] + 0.25*bBheight;
+			boundingBox[3] = boundingBox[3] - 0.25*bBheight;
+			//console.log("made Y extents smaller");
+		} while((maxY < boundingBox[3] - 0.25*bBheight && minY > boundingBox[2] + 0.25*bBheight) && boundingBox[3] > 0.75*height);
+	}
+	} 
+	return boundingBox;
+}
+
+
+function drawNode(node,ctx) {
+			ctx.fillStyle="hsla(" + (255 -  50*node.depth)%255 + ", 100% , " + (10 + 2*node.quad) +  "%, 1)";
+			ctx.fillRect(node.bounds[0], node.bounds[2], node.bounds[1]- node.bounds[0], node.bounds[3] - node.bounds[2]);
+			//ctx.font="20px Georgia"; //need to make this label display subject to a user control
+			//ctx.fillText(node.quad,node.posX + 0.5*node.bounds[1],node.posY + 0.5*node.bounds[3]);
+}
+
+function drawCross(pos, ctx, style){
+
+//var t = nodes[0];
+
+	ctx.strokeStyle = style;
+	ctx.lineWidth = 3;
+	ctx.beginPath();
+
+	ctx.moveTo(pos[0], pos[1] - 0.02*width);
+	ctx.lineTo(pos[0], pos[1] + 0.02*width);
+	ctx.moveTo(pos[0] - 0.02*width, pos[1]);
+	ctx.lineTo(pos[0] + 0.02*width, pos[1]);
+	ctx.stroke();
+
+
+
+
+}
+
+function getCoM(particleList){
+	
+if(particleList.length>0){
+	var cmX = 0;
+	var cmY = 0;
+	var cmM = 0;
+
+	for(i in particleList){
+		var pX = particleList[i].posX;
+		var pY = particleList[i].posY;
+		var pM = particleList[i].mass;
+		cmX = (cmM*cmX + pM*pX)/(cmM + pM);
+		cmY = (cmM*cmY + pM*pY)/(cmM + pM);
+		cmM = cmM + pM;
+		
+	}
+	return [cmX, cmY, cmM];
+} else {
+   return [0.5*width, 0.5*height, 0];
+}
+	
+}
+
+function constrain (val, min, max) {
+	return(Math.min(Math.max(val, min), max));
+}
+
+
+
+   
+function inputUpdate(val, min, max, idThis, idThat) {
+	val = constrain(val,min,max);
+	document.querySelector("#"+idThis).value = val;
+	document.querySelector("#"+idThat).value = val;
+}
+	
+function getInputValue(id) {
+    return(document.getElementById(id).value);
+}
+
+function playPause(){
+	var button = document.querySelector('#playPause');
+	if(paused){
+		button.textContent="Pause";
+		requestAnimationFrame(drawWorld);
+	} else {
+		button.textContent="Play";			
+	}
+	paused = !paused;
+}
+
+function addNP(){
+for(var i = 0; i < newN; i++){
+		//var randpX = 0.5*width + 0.375*width*(0.5 - Math.random());
+		//var randpY = 0.5*height + 0.375*height*(0.5 - Math.random());
+		var randpX = CoM[0] + 0.375*width*(0.5 - Math.random());
+		var randpY = CoM[1] + 0.375*height*(0.5 - Math.random());
+		//var randvX = (width/512)*(0.5 - Math.random());
+		//var randvY = (height/512)*(0.5 - Math.random());
+		var distX = randpX - 0.5*width;
+		var distY = randpY - 0.5*height;
+		var d = Math.sqrt((distX*distX)+(distY*distY));
+		var v = 0.02*width*Math.sqrt(1/d);
+		var randvX = v*distY/d;
+		var randvY = -1*v*distX/d; 
+
+		var q = newRandParticle(randpX, randpY, randvX, randvY, width/128);
+		q.label = N + i;
+		particles.push(q);
+	}
+	N = N + newN;
+}
+
+function jumpToOrigin(){
+	var button = document.querySelector('#jumpToOrigin');
+	lastCoM = [width/2, height/2];
+	var checkbox = document.querySelector('#fCoMChx');
+	checkbox.checked = false;
+	followCoM = false;
+	
+}
+
+function jumpToCoM(){
+	var button = document.querySelector('#jumpToCoM');
+	lastCoM = [CoM[0], CoM[1]];
+}
+
+function setVtoZero(){
+	var button = document.querySelector('#setVtoZero');
+	for(p in particles){
+		particles[p].velX = 0;
+		particles[p].velY = 0;
+	}
+}
+
+function clearP(){
+	particles = [];
+	nodeList = [];
+	N = 0;
+	
+}
+
+
+
+function toggleTree(){
+	var checkbox = document.querySelector('#treeChx');
+	if(checkbox.checked){
+		showTree = true;
+	} else {
+		showTree = false;	
+	}
+}
+
+function toggleCoM(){
+	var checkbox = document.querySelector('#sCoMChx');
+	if(checkbox.checked){
+		showCoM = true;
+	} else {
+		showCoM = false;	
+	}
+}
+
+function toggleOrigin(){
+	var checkbox = document.querySelector('#sOriChx');
+	if(checkbox.checked){
+		showOrigin = true;
+	} else {
+		showOrigin = false;	
+	}
+}
+
+function toggleFollowCoM(){
+	var checkbox = document.querySelector('#fCoMChx');
+	if(checkbox.checked){
+		followCoM = true;
+	} else {
+		followCoM = false;	
+	}
+}
+
+function toggleLabels(){
+	var checkbox = document.querySelector('#labChx');
+	if(checkbox.checked){
+		labels = true;
+	} else {
+		labels = false;	
+	}
+}
+
+
+function toggleP(){
+	var checkbox = document.querySelector('#pChx');
+	if(checkbox.checked){
+		showParticles = true;
+	} else {
+		showParticles = false;	
+	}
+}
+
+function toggleTrails(){
+	var checkbox = document.querySelector('#trlChx');
+	if(checkbox.checked){
+		trails = true;
+	} else {
+		trails = false;	
+	}
+}
+
+function toggleWalls(){
+	var checkbox = document.querySelector('#wallChx');
+	if(checkbox.checked){
+		Particle.prototype.walls = true;
+		walls = true;
+	} else {
+		Particle.prototype.walls = false;
+			walls = false;
+	}
+}
+
+function updateNewN(value){
+	var selectedN = document.getElementById('newN');
+	var button = document.querySelector('#addNP');
+	selectedN.innerHTML = value;
+	button.textContent="Add " + value + " particles";
+
+	newN = value/1;
+}
+
+function updateTrailP(value){
+	trailP = Math.round(1000*Math.pow(value,0.25))/1000;
+	var selectedTrailP = document.getElementById('trailPdisplay');
+	selectedTrailP.innerHTML = trailP;
+}
+</script>
+</body>
+</html>
